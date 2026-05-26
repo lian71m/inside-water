@@ -1,165 +1,726 @@
-<!DOCTYPE html>
+<!doctype html>
 <html>
-
-<head>
-  <style>
-    body {
-      margin: 0;
-      overflow: hidden;
-    }
-
-    canvas {
-      display: block;
-    }
-  </style>
-</head>
-
-<body>
-  <canvas id="canvas"></canvas>
-  <script>
-    const canvas = document.getElementById("canvas");
-    canvas.width = window.innerWidth;
-    canvas.height = window.innerHeight;
-    const ctx = canvas.getContext("2d");
-    let forceRatio = 1.1
-    let forceDirectionA = Math.PI
-    let forceDirectionB = Math.PI
-    let radius = Math.min(canvas.width, canvas.height) / 20
-
-    let playerX = canvas.width * 0.9
-    let playerY = canvas.height
-    let oppX = canvas.width / 2
-    let oppY = canvas.height - radius
-    let goalX = oppX
-    let goalY = 0
-
-    function draw() {
-      ctx.clearRect(0, 0, canvas.width, canvas.height)
-      ctx.fillStyle = "dodgerblue";
-      ctx.fillRect(goalX - radius, goalY, radius, radius);
-      ctx.beginPath()
-      ctx.fillStyle = "blue"
-      ctx.arc(oppX, oppY, radius, 0, Math.PI * 2)// x, y, width, height
-      ctx.fill()
-      ctx.beginPath()
-      ctx.fillStyle = "red"
-      ctx.arc(playerX, playerY, radius, 0, Math.PI * 2)// x, y, width, height
-      ctx.fill()
-      drawForce(playerX, playerY, forceDirectionA, radius)
-      drawForce(oppX, oppY, forceDirectionB, radius)
-    }
-
-    function drawForce(x, y, direction, l) {
-      ctx.beginPath()
-      ctx.fillStyle = "green"
-      ctx.moveTo(x, y)
-      d = Math.sqrt(x ** 2 + y ** 2)
-      dirX = (Math.cos(direction) * x - Math.sin(direction) * y) / d
-      focusX = x + dirX * l
-      dirY = (Math.sin(direction) * x + Math.cos(direction) * y) / d
-      focusY = y + dirY * l
-      ctx.lineTo(focusX, focusY)
-      ctx.stroke()
-    }
-
-
-    function updatePlayer(dt) {
-      // console.log(1 + 2 * dt * Math.cos(forceDirectionB) + dt ** 2)
-      // rho = Math.sqrt(1 + 2 * dt * Math.cos(forceDirectionB) + dt ** 2)
-      // c = (1 + dt * Math.cos(forceDirectionB)) / rho
-      // s = (dt * Math.sin(forceDirectionB)) / rho
-      dPlayer = Math.sqrt(playerX ** 2 + playerY ** 2)
-      dOpp = Math.sqrt(oppX ** 2 + oppY ** 2)
-      // console.log(playerX)
-      // console.log(playerY)
-      // player0x = playerX + forceRatio * dt * (Math.cos(forceDirectionA) * playerX - Math.sin(forceDirectionA) * playerY) / d
-      // player0y = playerY + forceRatio * dt * (Math.sin(forceDirectionA) * playerX + Math.cos(forceDirectionA) * playerY) / d
-      // playerX = (c * player0x + s * player0y)
-      // playerY = (-s * player0x + c * player0y)
-      // console.log(rho)
-      // console.log(c)
-      // console.log(s)
-      // console.log(d)
-      // console.log(player0x)
-      // console.log(player0y)
-      // console.log(playerX)
-      // console.log(playerY)
-      playerX = playerX + forceRatio * dt * (Math.cos(forceDirectionA) * playerX - Math.sin(forceDirectionA) * playerY) / dPlayer
-      playerY = playerY + forceRatio * dt * (Math.sin(forceDirectionA) * playerX + Math.cos(forceDirectionA) * playerY) / dPlayer
-      deltaOppX = dt * (Math.cos(forceDirectionB) * oppX - Math.sin(forceDirectionB) * oppY) / dOpp
-      deltaOppY = dt * (Math.sin(forceDirectionB) * oppX + Math.cos(forceDirectionB) * oppY) / dOpp
-      newPlayer = transform(goalX, goalY, oppX + deltaOppX, oppY + deltaOppY, playerX, playerY, goalX, goalY, oppX, oppY)
-      playerX = newPlayer[0]
-      playerY = newPlayer[1]
-    }
-
-
-
-
-    function transform(ax, ay, bx, by, cx, cy, a2x, a2y, b2x, b2y) {
-      ux = bx - ax
-      uy = by - ay
-      vx = b2x - a2x
-      vy = b2y - a2y
-      wx = cx - ax
-      wy = cy - ay
-      pUx = -uy
-      pUy = ux
-      pVx = -vy
-      pVy = vx
-      d = ux ** 2 + uy ** 2
-      a = (wx * ux + wy * uy) / d
-      b = (wx * pUx + wy * pUy) / d
-      c2x = a2x + a * vx + b * pVx
-      c2y = a2y + a * vy + b * pVy
-      return [c2x, c2y]
-    }
-
-    function loop() {
-      updatePlayer(0.5)
-      draw()
-      if (gameOver()) {
-        return
+  <head>
+    <style>
+      body {
+        margin: 0;
+        overflow: hidden;
       }
-      requestAnimationFrame(loop)
-    }
 
-    function gameOver() {
-      console.log(collinearity(playerX, playerY, oppX, oppY, goalX, goalY))
-      if (Math.abs(playerX - oppX) < 1 || collinearity(playerX, playerY, oppX, oppY, goalX, goalY) < 1) {
-        if (playerY < oppY) {
-          console.log("You win!")
+      canvas {
+        display: block;
+      }
+    </style>
+  </head>
+
+  <body>
+    <canvas id="CANVAS"></canvas>
+    <script>
+      const CANVAS = document.getElementById("CANVAS");
+      CANVAS.width = window.innerWidth * 0.9;
+      CANVAS.height = window.innerHeight * 0.9;
+      const CTX = CANVAS.getContext("2d");
+      console.log("CANVAS", CANVAS.width, CANVAS.height);
+
+      const MAX = 2 ** 8 - 1;
+      const DT = 0.01;
+      const DALPHA = 0.1;
+      const GOALINITX = 0.5;
+      const GOALINITY = 0;
+      const OPPINITX = 0.5;
+      const OPPINITY = 1;
+      let HELP = false;
+      let SIMILAR = true;
+      let GOALX = GOALINITX;
+      let GOALY = GOALINITY;
+      let OPPX = OPPINITX;
+      let OPPY = OPPINITY;
+      let PLAYERMANUAL = false;
+      let PLAYERSPEED = 0.9;
+      let PLAYERX = 0;
+      let PLAYERY = 1;
+      let PLAYERANGLE = 0;
+
+      function init() {
+        PLAYERX = Math.random();
+        PLAYERY = Math.random();
+        // GOALX = Math.random();
+        // GOALY = Math.random();
+        OPPX = Math.random();
+        OPPY = Math.random();
+        PLAYERSPEED = 1.5*Math.random() + 0.5;
+        // console.log("goal", GOALX, GOALY);
+        // console.log("player", PLAYERX, PLAYERY, PLAYERSPEED);
+        // console.log("opp", OPPX, OPPY);
+      }
+      init();
+
+      // function angle(x1, y1, x2, y2) {
+      //   return Math.atan2(y2 - y1, x2 - x1)
+      // } // ?
+      function norm(x, y) {
+        return Math.sqrt(x ** 2 + y ** 2);
+      }
+      function distance(x1, y1, x2, y2) {
+        return norm(x2 - x1, y2 - y1);
+      }
+      function collinearity(x1, y1, x2, y2, x3, y3) {
+        return x1 * (y2 - y3) + x2 * (y3 - y1) + x3 * (y1 - y2);
+      }
+      function calcnormedvector(x1, y1, x2, y2) {
+        const d = distance(x1, y1, x2, y2);
+        return [(x2 - x1) / d, (y2 - y1) / d];
+      }
+      function calcp(slowerx, slowery, fasterx, fastery, goalx, goaly) {
+        const [ux, uy] = calcnormedvector(fasterx, fastery, goalx, goaly);
+        return (slowerx - fasterx) * ux + (slowery - fastery) * uy;
+      }
+      function calcnormal(slowerx, slowery, fasterx, fastery, goalx, goaly) {
+        const p = calcp(slowerx, slowery, fasterx, fastery, goalx, goaly);
+        const [ux, uy] = calcnormedvector(fasterx, fastery, goalx, goaly);
+        return [slowerx - fasterx - p * ux, slowery - fastery - p * uy];
+      }
+      function calch(slowerx, slowery, fasterx, fastery, goalx, goaly) {
+        const [nx, ny] = calcnormal(
+          slowerx,
+          slowery,
+          fasterx,
+          fastery,
+          goalx,
+          goaly,
+        );
+        return norm(nx, ny);
+      }
+      function slowerwinsdirect(
+        slowerx,
+        slowery,
+        fasterx,
+        fastery,
+        goalx,
+        goaly,
+        slowerspeed,
+      ) {
+        const dslower = distance(slowerx, slowery, goalx, goaly);
+        const dfaster = distance(fasterx, fastery, goalx, goaly);
+        // console.log("slowerwinsdirect", dslower, dfaster, slowerspeed);
+        return dslower < slowerspeed * dfaster;
+      }
+      function insidewater(
+        slowerx,
+        slowery,
+        fasterx,
+        fastery,
+        goalx,
+        goaly,
+        slowerspeed,
+      ) {
+        const h = calch(slowerx, slowery, fasterx, fastery, goalx, goaly);
+        const p = calcp(slowerx, slowery, fasterx, fastery, goalx, goaly);
+        // console.log("insidewater", h, p);
+        return h * Math.sqrt(1 - slowerspeed ** 2) < slowerspeed * p;
+      }
+      function calcs(slowerspeed) {
+        return slowerspeed / Math.sqrt(1 - slowerspeed ** 2);
+      }
+      // function insidewater2(slowerx, slowery, fasterx, fastery, goalx, goaly, slowerspeed) {
+      //   let s = r / Math.sqrt(1-r**2)
+      //   let h = calch(slowerx, slowery, fasterx, fastery, goalx, goaly)
+      //   let p = calcp(slowerx, slowery, fasterx, fastery, goalx, goaly)
+      //   let dfaster = distance(fasterx, fastery, goalx, goaly)
+      //   let x = (p + s*h)/dfaster
+      //   return 0 < x && x <= 1
+      // }
+      function guaranteedinsidewater(
+        slowerx,
+        slowery,
+        fasterx,
+        fastery,
+        goalx,
+        goaly,
+        slowerspeed,
+      ) {
+        const h = calch(slowerx, slowery, fasterx, fastery, goalx, goaly);
+        const p = calcp(slowerx, slowery, fasterx, fastery, goalx, goaly);
+        const dfaster = distance(fasterx, fastery, goalx, goaly);
+        // console.log("guaranteedinsidewater", h, p, dfaster);
+        return (
+          h * Math.sqrt((1 - slowerspeed) / (1 + slowerspeed)) <
+          p - (1 - slowerspeed) * dfaster
+        );
+      }
+      function insidewaterpoint(
+        slowerx,
+        slowery,
+        fasterx,
+        fastery,
+        goalx,
+        goaly,
+        slowerspeed,
+      ) {
+        const h = calch(slowerx, slowery, fasterx, fastery, goalx, goaly);
+        const p = calcp(slowerx, slowery, fasterx, fastery, goalx, goaly);
+        const s = calcs(slowerspeed);
+        const [ux, uy] = calcnormedvector(fasterx, fastery, goalx, goaly);
+        // console.log("insidewaterpoint", h, p, s, ux, uy);
+        return [fasterx + (p + s * h) * ux, fastery + (p + s * h) * uy];
+      }
+
+      function similar(x1, y1, x2, y2, x3, y3, x12, y12, x22, y22) {
+        const ux = x2 - x1;
+        const uy = y2 - y1;
+        const vx = x22 - x12;
+        const vy = y22 - y12;
+        const wx = x3 - x1;
+        const wy = y3 - y1;
+        const pUx = -uy;
+        const pUy = ux;
+        const pVx = -vy;
+        const pVy = vx;
+        const d = ux ** 2 + uy ** 2;
+        const a = (wx * ux + wy * uy) / d;
+        const b = (wx * pUx + wy * pUy) / d;
+        return [x12 + a * vx + b * pVx, y12 + a * vy + b * pVy];
+      }
+
+      function targetSlowerFaster(
+        slowerx,
+        slowery,
+        fasterx,
+        fastery,
+        goalx,
+        goaly,
+        slowerspeed,
+        dt,
+      ) {
+        let [slowertargetx, slowertargety] = [goalx, goaly];
+        let [fastertargetx, fastertargety] = [goalx, goaly];
+        const [insidewaterx, insidewatery] = insidewaterpoint(
+          slowerx,
+          slowery,
+          fasterx,
+          fastery,
+          goalx,
+          goaly,
+          slowerspeed,
+        );
+        let regime = 0;
+        if (
+          slowerwinsdirect(
+            slowerx,
+            slowery,
+            fasterx,
+            fastery,
+            goalx,
+            goaly,
+            slowerspeed,
+          )
+        ) {
+          // slow wins direct, both to goal
+          // console.log("slow wins direct");
+          regime = 1;
+        } else if (
+          insidewater(
+            slowerx,
+            slowery,
+            fasterx,
+            fastery,
+            goalx,
+            goaly,
+            slowerspeed,
+          )
+        ) {
+          // slow to inside water
+          // console.log("inside water possible");
+          [slowertargetx, slowertargety] = [insidewaterx, insidewatery];
+          if (
+            guaranteedinsidewater(
+              slowerx,
+              slowery,
+              fasterx,
+              fastery,
+              goalx,
+              goaly,
+              slowerspeed,
+            )
+          ) {
+            // guaranteed inside water, fast to goal
+            // console.log("guaranteed inside water");
+            regime = 2;
+          } else {
+            // contested inside water, fast sidestap
+            // console.log("contested inside water, faster sidestep");
+            const h = calch(slowerx, slowery, fasterx, fastery, goalx, goaly);
+            const [nx, ny] = calcnormal(
+              slowerx,
+              slowery,
+              fasterx,
+              fastery,
+              goalx,
+              goaly,
+            );
+            regime = 3;
+            // console.log("h", h);
+            let [nxh, nyh] = [0, 0];
+            if (h != 0) {
+              [nxh, nyh] = [nx / h, ny / h];
+            }
+            [fastertargetx, fastertargety] = [fasterx - nxh, fastery - nyh];
+          }
         } else {
-          console.log("You lose")
+          // console.log("faster wins direct, no inside water");
+          regime = 4;
         }
-        return true
-      } else if (Math.abs(playerX - canvas.width) < 1) {
-        console.log("You lose")
-        return true
+        return [
+          slowertargetx,
+          slowertargety,
+          fastertargetx,
+          fastertargety,
+          insidewaterx,
+          insidewatery,
+          regime,
+        ];
       }
-      return false
-    }
-
-    function collinearity(x1, y1, x2, y2, x3, y3) {
-      return x1 * (y2 - y3) + x2 * (y3 - y1) + x3 * (y1 - y2)
-    }
-
-    window.addEventListener("keypress", (e) => {
-      if (e.key === "Enter") {
-        updatePlayer(1)
-      } else if (e.key === "q") {
-        forceDirectionA = (((forceDirectionA - 0.1) % (2 * Math.PI)) + 2 * Math.PI) % (2 * Math.PI)
-      } else if (e.key === "w") {
-        forceDirectionA = (((forceDirectionA + 0.1) % (2 * Math.PI)) + 2 * Math.PI) % (2 * Math.PI)
-      } else if (e.key === "o") {
-        forceDirectionB = (((forceDirectionB - 0.1) % (2 * Math.PI)) + 2 * Math.PI) % (2 * Math.PI)
-      } else if (e.key === "p") {
-        forceDirectionB = (((forceDirectionB + 0.1) % (2 * Math.PI)) + 2 * Math.PI) % (2 * Math.PI)
+      function deltaGivenTarget(x, y, targetx, targety, speed, dt) {
+        const d = distance(targetx, targety, x, y);
+        const factor = d == 0 ? 1 : (dt * speed) / d;
+        const dx = factor * (targetx - x);
+        const dy = factor * (targety - y);
+        return [dx, dy];
       }
-    });
+      function turn(playerx, playery, goalx, goaly, playerangle) {
+        dx = goalx - playerx;
+        dy = goaly - playery;
+        playertargetx =
+          playerx + dx * Math.cos(playerangle) + dy * Math.sin(playerangle);
+        playertargety =
+          playery - dx * Math.sin(playerangle) + dy * Math.cos(playerangle);
+        return [playertargetx, playertargety];
+      }
+      function slowerFaster(playerx, playery, oppx, oppy, playerspeed) {
+        let [slowerx, slowery, fasterx, fastery, speed] = [
+          playerx,
+          playery,
+          oppx,
+          oppy,
+          playerspeed,
+        ];
+        if (1 < playerspeed) {
+          [slowerx, slowery, fasterx, fastery, speed] = [
+            oppx,
+            oppy,
+            playerx,
+            playery,
+            1 / playerspeed,
+          ];
+        }
+        return [slowerx, slowery, fasterx, fastery, speed];
+      }
+      function delta(
+        playerx,
+        playery,
+        oppx,
+        oppy,
+        goalx,
+        goaly,
+        playerangle,
+        playerspeed,
+        dt,
+      ) {
+        // console.log("delta2", playerx, playery, oppx, oppy, playerangle, playerspeed);
+        let [slowerx, slowery, fasterx, fastery, speed] = slowerFaster(
+          playerx,
+          playery,
+          oppx,
+          oppy,
+          playerspeed,
+        );
+        // console.log("delta25", slowerx, slowery, fasterx, fastery, speed);
+        let [
+          slowertargetx,
+          slowertargety,
+          fastertargetx,
+          fastertargety,
+          insidewaterx,
+          insidewatery,
+          regime,
+        ] = targetSlowerFaster(
+          slowerx,
+          slowery,
+          fasterx,
+          fastery,
+          goalx,
+          goaly,
+          speed,
+          dt,
+        );
+        // console.log("delta3", slowertargetx, slowertargety, fastertargetx, fastertargety, regime);
+        let [slowerdx, slowerdy] = deltaGivenTarget(
+          slowerx,
+          slowery,
+          slowertargetx,
+          slowertargety,
+          playerspeed,
+          dt,
+        );
+        // console.log("delta4", slowerdx, slowerdy);
+        let [fasterdx, fasterdy] = deltaGivenTarget(
+          fasterx,
+          fastery,
+          fastertargetx,
+          fastertargety,
+          1 / playerspeed,
+          dt,
+        );
+        // console.log("delta5", fasterdx, fasterdy);
+        let [playermanualtargetx, playermanualtargety] = turn(
+          playerx,
+          playery,
+          goalx,
+          goaly,
+          playerangle,
+        );
+        // console.log("delta55", playermanualtargetx, playermanualtargety); // DEBUG
+        let [playermanualdx, playermanualdy] = deltaGivenTarget(
+          playerx,
+          playery,
+          playermanualtargetx,
+          playermanualtargety,
+          playerspeed,
+          dt,
+        );
+        // console.log("delta6", playermanualdx, playermanualdy);
+        if (1 < playerspeed) {
+          [slowerdx, slowerdy, fasterdx, fasterdy] = [
+            fasterdx,
+            fasterdy,
+            slowerdx,
+            slowerdy,
+          ];
+        }
+        // console.log("delta7", slowerdx, slowerdy, fasterdx, fasterdy, playermanualdx, playermanualdy);
+        return [
+          slowerdx,
+          slowerdy,
+          fasterdx,
+          fasterdy,
+          playermanualdx,
+          playermanualdy,
+          insidewaterx,
+          insidewatery,
+        ];
+      }
+      function newposition(
+        playerx,
+        playery,
+        oppx,
+        oppy,
+        goalx,
+        goaly,
+        playerangle,
+        playerspeed,
+        playermanual,
+        dt,
+      ) {
+        // console.log("newposition", dt, playerx, playery, oppx, oppy); // DEBUG
+        let [
+          playerdx,
+          playerdy,
+          oppdx,
+          oppdy,
+          playermanualdx,
+          playermanualdy,
+          insidewaterx,
+          insidewatery,
+        ] = delta(
+          playerx,
+          playery,
+          oppx,
+          oppy,
+          goalx,
+          goaly,
+          playerangle,
+          playerspeed,
+          dt,
+        );
+        if (playermanual) {
+          [playerdx, playerdy] = [playermanualdx, playermanualdy];
+        }
+        // console.log(
+        //   "newposition delta",
+        //   playerdx,
+        //   playerdy,
+        //   oppdx,
+        //   oppdy,
+        //   playermanualdx,
+        //   playermanualdy,
+        // ); // DEBUG
+        if (SIMILAR) {
+          const [playersimilarx, playersimilary] = similar(
+            goalx,
+            goaly,
+            oppx + oppdx,
+            oppy + oppdy,
+            playerx + playerdx,
+            playery + playerdy,
+            GOALINITX,
+            GOALINITY,
+            OPPINITX,
+            OPPINITY,
+          );
+          return [
+            playersimilarx,
+            playersimilary,
+            OPPINITX,
+            OPPINITY,
+            playerdx,
+            playerdy,
+            oppdx,
+            oppdy,
+            insidewaterx,
+            insidewatery,
+          ];
+        }
 
-    requestAnimationFrame(loop)
-  </script>
-</body>
+        return [
+          playerx + playerdx,
+          playery + playerdy,
+          oppx + oppdx,
+          oppy + oppdy,
+          playerdx,
+          playerdy,
+          oppdx,
+          oppdy,
+          insidewaterx,
+          insidewatery,
+        ];
+      }
 
+      function loop() {
+        oldcollinearity = collinearity(
+          PLAYERX,
+          PLAYERY,
+          OPPX,
+          OPPY,
+          GOALX,
+          GOALY,
+        );
+        console.log("oldcollinearity", oldcollinearity); // DEBUG
+        let [
+          playerx,
+          playery,
+          oppx,
+          oppy,
+          playerdx,
+          playerdy,
+          oppdx,
+          oppdy,
+          insidewaterx,
+          insidewatery,
+        ] = newposition(
+          PLAYERX,
+          PLAYERY,
+          OPPX,
+          OPPY,
+          GOALX,
+          GOALY,
+          PLAYERANGLE,
+          PLAYERSPEED,
+          PLAYERMANUAL,
+          DT,
+        );
+        [PLAYERX, PLAYERY, OPPX, OPPY] = [playerx, playery, oppx, oppy];
+        console.log("goal", GOALX, GOALY); // DEBUG
+        console.log("player", PLAYERX, PLAYERY, PLAYERSPEED); // DEBUG
+        console.log("opp", OPPX, OPPY); // DEBUG
+        console.log(
+          "player distance",
+          distance(PLAYERX, PLAYERY, GOALX, GOALY),
+        ); // DEBUG
+        console.log("opp distance", distance(OPPX, OPPY, GOALX, GOALY)); // DEBUG
+        draw(
+          PLAYERX,
+          PLAYERY,
+          OPPX,
+          OPPY,
+          GOALX,
+          GOALY,
+          playerdx,
+          playerdy,
+          oppdx,
+          oppdy,
+          PLAYERSPEED,
+          insidewaterx,
+          insidewatery,
+        );
+        newcollinearity = collinearity(
+          PLAYERX,
+          PLAYERY,
+          OPPX,
+          OPPY,
+          GOALX,
+          GOALY,
+        );
+        console.log("newcollinearity", newcollinearity); // DEBUG
+        if (
+          newcollinearity == 0 ||
+          Math.sign(newcollinearity) != Math.sign(oldcollinearity)
+        ) {
+          if (
+            distance(PLAYERX, PLAYERY, GOALX, GOALY) <=
+            distance(OPPX, OPPY, GOALX, GOALY)
+          ) {
+            alert("player wins");
+            // console.log("player wins"); // DEBUG
+          } else {
+            alert("player loses");
+            // console.log("player loses"); // DEBUG
+          }
+          init(); // DEBUG
+          // return; // DEBUG
+        }
+        sleep(1000); // DEBUG
+        requestAnimationFrame(loop);
+      }
+      function sleep(ms) {
+        const end = Date.now() + ms;
+        while (Date.now() < end) {}
+      }
+
+      function draw(
+        playerx,
+        playery,
+        oppx,
+        oppy,
+        goalx,
+        goaly,
+        playerdx,
+        playerdy,
+        oppdx,
+        oppdy,
+        playerspeed,
+        insidewaterx,
+        insidewatery,
+      ) {
+        const size = 10;
+        CTX.clearRect(0, 0, CANVAS.width, CANVAS.height);
+        if (HELP) {
+          drawRegimes(oppx, oppy, goalx, goaly, playerspeed);
+          drawInside(insidewaterx, insidewatery, size, "green");
+        }
+        drawInside(goalx, goaly, size, "red");
+        drawInside(playerx, playery, size, "blue");
+        drawInside(oppx, oppy, size, "black");
+        drawDirection(playerx, playery, playerdx, playerdy);
+        drawDirection(oppx, oppy, oppdx, oppdy);
+        // drawInside(0, 0, size, "green");
+        // drawInside(1, 0, size, "green");
+        // drawInside(1, 1, size, "green");
+        // drawInside(0, 1, size, "green");
+      }
+      function drawSize(x, y, size) {
+        let px = x * CANVAS.width;
+        let py = y * CANVAS.height;
+        let changed = false;
+        if (px < 0) {
+          px = 0;
+          changed = true;
+        } else if (CANVAS.width < px + size) {
+          px = CANVAS.width - size;
+          changed = true;
+        }
+        if (py < 0) {
+          py = 0;
+          changed = true;
+        } else if (CANVAS.height < py + size) {
+          py = CANVAS.height - size;
+          changed = true;
+        }
+        const psize = changed ? size / 2 : size;
+        return [px, py, psize];
+      }
+      function drawRegimes(oppx, oppy, goalx, goaly, playerspeed) {
+        const image = CTX.createImageData(CANVAS.width, CANVAS.height).data;
+        const GRANULARITY = 1;
+        for (let y = 0; y < CANVAS.height; y++) {
+          for (let x = 0; x < CANVAS.width; x++) {
+            const p = (y * CANVAS.width + x) * 4;
+            if (!(y % GRANULARITY == 0 && x % GRANULARITY == 0)) {
+              image[p] = 0;
+              image[p + 1] = 0;
+              image[p + 2] = 0;
+              image[p + 3] = 0;
+              continue;
+            }
+            const [slowerx, slowery, fasterx, fastery, speed] = slowerFaster(
+              x / CANVAS.width,
+              y / CANVAS.height,
+              oppx,
+              oppy,
+              playerspeed,
+            );
+            const [, , , , , , regime] = targetSlowerFaster(
+              slowerx,
+              slowery,
+              fasterx,
+              fastery,
+              goalx,
+              goaly,
+              speed,
+              1,
+            );
+            let [r, g, b] = [MAX, MAX, MAX];
+            if (regime == 1) {
+              [r, g, b] = [0, 0, MAX];
+            } else if (regime == 2) {
+              [r, g, b] = [0, MAX, 0];
+            } else if (regime == 3) {
+              [r, g, b] = [MAX, MAX, 0];
+            }
+            image[p] = r;
+            image[p + 1] = g;
+            image[p + 2] = b;
+            image[p + 3] = MAX / 2;
+          }
+        }
+        console.log("Regime:", oppx, oppy, goalx, goaly, playerspeed);
+        CTX.putImageData(
+          new ImageData(image, CANVAS.width, CANVAS.height),
+          0,
+          0,
+        );
+      }
+      function drawInside(x, y, size, c) {
+        const [px, py, psize] = drawSize(x, y, size);
+        CTX.fillStyle = c;
+        CTX.fillRect(px, py, psize, psize);
+      }
+      function drawDirection(x, y, dx, dy) {
+        CTX.fillStyle = "black";
+        CTX.beginPath();
+        let [px, py, psize] = drawSize(x, y, 1);
+        CTX.moveTo(px, py);
+        [px, py, psize] = drawSize(x + dx, y + dy, 1);
+        CTX.lineTo(px, py);
+        CTX.stroke();
+      }
+
+      window.addEventListener("keypress", (e) => {
+        if (e.key === "Enter") {
+          requestAnimationFrame(loop);
+        } else if (e.key === " ") {
+          HELP = !HELP;
+        } else if (e.key === "s") {
+          SIMILAR = !SIMILAR;
+        } else if (e.key === "q") {
+          PLAYERMANUAL = true;
+          PLAYERANGLE += DALPHA;
+        } else if (e.key === "w") {
+          PLAYERMANUAL = true;
+          PLAYERANGLE -= DALPHA;
+        }
+      });
+
+      requestAnimationFrame(loop);
+    </script>
+  </body>
 </html>
