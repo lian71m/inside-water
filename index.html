@@ -10,11 +10,72 @@
       canvas {
         display: block;
       }
+
+      #speedbox {
+        position: fixed;
+        bottom: 14px;
+        right: 16px;
+        font: 13px monospace;
+        background: rgba(255, 255, 255, 0.85);
+        padding: 8px 12px;
+        border-radius: 6px;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        user-select: none;
+      }
+
+      #speed {
+        width: 140px;
+      }
+
+      #legend {
+        position: fixed;
+        bottom: 14px;
+        left: 16px;
+        font: 13px monospace;
+        background: rgba(255, 255, 255, 0.9);
+        padding: 10px 12px;
+        border-radius: 6px;
+        user-select: none;
+        display: none;
+      }
+
+      #legend .row {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin: 3px 0;
+      }
+
+      #legend .sw {
+        width: 14px;
+        height: 14px;
+        border: 1px solid rgba(0, 0, 0, 0.3);
+        flex: 0 0 auto;
+      }
+
+      #legend .title {
+        font-weight: bold;
+        margin-bottom: 6px;
+      }
     </style>
   </head>
 
   <body>
     <canvas id="CANVAS"></canvas>
+    <div id="speedbox">
+      <label for="speed">speed</label>
+      <input id="speed" type="range" min="1" max="60" step="1" value="8" />
+      <span id="speedval">8</span>/s
+    </div>
+    <div id="legend">
+      <div class="title">Regime map — your prospects from each spot</div>
+      <div class="row"><span class="sw" style="background:#0000ff"></span> You win the race outright</div>
+      <div class="row"><span class="sw" style="background:#00ff00"></span> Guaranteed cutoff (inside water)</div>
+      <div class="row"><span class="sw" style="background:#ffff00"></span> Contested cutoff — it's a fight</div>
+      <div class="row"><span class="sw" style="background:#ffffff"></span> You lose clean — no winning play</div>
+    </div>
     <script>
       const CANVAS = document.getElementById("CANVAS");
       CANVAS.width = window.innerWidth * 0.9;
@@ -25,10 +86,16 @@
       const MAX = 2 ** 8 - 1;
       const DT = 0.01;
       const DALPHA = 0.1;
-      const GOALINITX = 0.5;
-      const GOALINITY = 0;
-      const OPPINITX = 0.5;
-      const OPPINITY = 1;
+      // Anchor positions the SIMILAR (river-frame) transform maps back onto.
+      // These are snapshotted from the actual round-start positions in init(),
+      // so the opponent really does stay fixed on screen while the player
+      // moves relative to it. They must match the live start or the transform
+      // blows the player off-screen.
+      let GOALINITX = 0.5;
+      let GOALINITY = 0;
+      let OPPINITX = 0.5;
+      let OPPINITY = 1;
+
       let HELP = false;
       let SIMILAR = true;
       let GOALX = GOALINITX;
@@ -41,17 +108,35 @@
       let PLAYERY = 1;
       let PLAYERANGLE = 0;
 
+      // Holds the latest movement deltas / inside-water point so draw() can
+      // render arrows even on frames where the sim isn't stepping (paused).
+      let LAST = {
+        playerdx: 0,
+        playerdy: 0,
+        oppdx: 0,
+        oppdy: 0,
+        insidewaterx: 0,
+        insidewatery: 0,
+      };
+
       function init() {
-        PLAYERX = Math.random();
-        PLAYERY = Math.random();
-        // GOALX = Math.random();
-        // GOALY = Math.random();
-        OPPX = Math.random();
-        OPPY = Math.random();
-        PLAYERSPEED = 1.5*Math.random() + 0.5;
-        // console.log("goal", GOALX, GOALY);
-        // console.log("player", PLAYERX, PLAYERY, PLAYERSPEED);
-        // console.log("opp", OPPX, OPPY);
+        // Goal fixed at top-center, opponent at bottom-center: this is the
+        // river-frame baseline the SIMILAR transform keeps stationary.
+        GOALX = 0.5;
+        GOALY = 0;
+        OPPX = 0.5;
+        OPPY = 1;
+        // Player starts off to one side so there's a real triangle to play.
+        PLAYERX = 0.15 + 0.7 * Math.random();
+        PLAYERY = 0.75 + 0.2 * Math.random();
+        PLAYERSPEED = 1.5 * Math.random() + 0.5;
+
+        // Snapshot the actual start as the transform anchors so opp/goal
+        // really do stay put on screen during the round.
+        GOALINITX = GOALX;
+        GOALINITY = GOALY;
+        OPPINITX = OPPX;
+        OPPINITY = OPPY;
       }
       init();
 
@@ -288,11 +373,11 @@
         return [dx, dy];
       }
       function turn(playerx, playery, goalx, goaly, playerangle) {
-        dx = goalx - playerx;
-        dy = goaly - playery;
-        playertargetx =
+        const dx = goalx - playerx;
+        const dy = goaly - playery;
+        const playertargetx =
           playerx + dx * Math.cos(playerangle) + dy * Math.sin(playerangle);
-        playertargety =
+        const playertargety =
           playery - dx * Math.sin(playerangle) + dy * Math.cos(playerangle);
         return [playertargetx, playertargety];
       }
@@ -495,8 +580,16 @@
         ];
       }
 
-      function loop() {
-        oldcollinearity = collinearity(
+      // Controls how fast the sim advances, in steps per second.
+      // Lower = slower, more watchable game. Press +/- to change live.
+      let STEPS_PER_SECOND = 8;
+      let RUNNING = false;       // is the sim currently advancing?
+      let GAMEOVER = false;      // has someone won the current round?
+      let RESULT = "";           // last round result text
+      let lastStepTime = 0;      // timestamp of the previous physics step
+
+      function step() {
+        const oldcollinearity = collinearity(
           PLAYERX,
           PLAYERY,
           OPPX,
@@ -504,7 +597,6 @@
           GOALX,
           GOALY,
         );
-        console.log("oldcollinearity", oldcollinearity); // DEBUG
         let [
           playerx,
           playery,
@@ -529,30 +621,15 @@
           DT,
         );
         [PLAYERX, PLAYERY, OPPX, OPPY] = [playerx, playery, oppx, oppy];
-        console.log("goal", GOALX, GOALY); // DEBUG
-        console.log("player", PLAYERX, PLAYERY, PLAYERSPEED); // DEBUG
-        console.log("opp", OPPX, OPPY); // DEBUG
-        console.log(
-          "player distance",
-          distance(PLAYERX, PLAYERY, GOALX, GOALY),
-        ); // DEBUG
-        console.log("opp distance", distance(OPPX, OPPY, GOALX, GOALY)); // DEBUG
-        draw(
-          PLAYERX,
-          PLAYERY,
-          OPPX,
-          OPPY,
-          GOALX,
-          GOALY,
-          playerdx,
-          playerdy,
-          oppdx,
-          oppdy,
-          PLAYERSPEED,
-          insidewaterx,
-          insidewatery,
-        );
-        newcollinearity = collinearity(
+
+        LAST.playerdx = playerdx;
+        LAST.playerdy = playerdy;
+        LAST.oppdx = oppdx;
+        LAST.oppdy = oppdy;
+        LAST.insidewaterx = insidewaterx;
+        LAST.insidewatery = insidewatery;
+
+        const newcollinearity = collinearity(
           PLAYERX,
           PLAYERY,
           OPPX,
@@ -560,7 +637,6 @@
           GOALX,
           GOALY,
         );
-        console.log("newcollinearity", newcollinearity); // DEBUG
         if (
           newcollinearity == 0 ||
           Math.sign(newcollinearity) != Math.sign(oldcollinearity)
@@ -569,21 +645,39 @@
             distance(PLAYERX, PLAYERY, GOALX, GOALY) <=
             distance(OPPX, OPPY, GOALX, GOALY)
           ) {
-            alert("player wins");
-            // console.log("player wins"); // DEBUG
+            RESULT = "PLAYER WINS";
           } else {
-            alert("player loses");
-            // console.log("player loses"); // DEBUG
+            RESULT = "PLAYER LOSES";
           }
-          init(); // DEBUG
-          // return; // DEBUG
+          GAMEOVER = true;
+          RUNNING = false;
         }
-        sleep(1000); // DEBUG
-        requestAnimationFrame(loop);
       }
-      function sleep(ms) {
-        const end = Date.now() + ms;
-        while (Date.now() < end) {}
+
+      // Single animation loop. Started exactly once at the bottom of the
+      // script and never anywhere else, so there is only ever ONE loop alive.
+      function loop(now) {
+        if (RUNNING && now - lastStepTime >= 1000 / STEPS_PER_SECOND) {
+          lastStepTime = now;
+          step();
+        }
+        draw(
+          PLAYERX,
+          PLAYERY,
+          OPPX,
+          OPPY,
+          GOALX,
+          GOALY,
+          LAST.playerdx,
+          LAST.playerdy,
+          LAST.oppdx,
+          LAST.oppdy,
+          PLAYERSPEED,
+          LAST.insidewaterx,
+          LAST.insidewatery,
+        );
+        drawHUD();
+        requestAnimationFrame(loop);
       }
 
       function draw(
@@ -668,12 +762,22 @@
               speed,
               1,
             );
+            // The regime above is always from the SLOWER swimmer's view.
+            // When the player is the FASTER swimmer, flip it to the player's
+            // view so colors always mean the same thing for the player:
+            //   win-clean(1) <-> lose-clean(4), guaranteed(2) <-> contested(3).
+            // This recolors only; the regime math itself is unchanged.
+            let displayRegime = regime;
+            if (playerspeed > 1) {
+              const flip = { 1: 4, 4: 1, 2: 3, 3: 2 };
+              displayRegime = flip[regime];
+            }
             let [r, g, b] = [MAX, MAX, MAX];
-            if (regime == 1) {
+            if (displayRegime == 1) {
               [r, g, b] = [0, 0, MAX];
-            } else if (regime == 2) {
+            } else if (displayRegime == 2) {
               [r, g, b] = [0, MAX, 0];
-            } else if (regime == 3) {
+            } else if (displayRegime == 3) {
               [r, g, b] = [MAX, MAX, 0];
             }
             image[p] = r;
@@ -704,11 +808,53 @@
         CTX.stroke();
       }
 
+      function newRound() {
+        init();
+        PLAYERANGLE = 0;
+        PLAYERMANUAL = false;
+        GAMEOVER = false;
+        RESULT = "";
+        RUNNING = false;
+      }
+
+      function drawHUD() {
+        CTX.save();
+        CTX.fillStyle = "rgba(0,0,0,0.85)";
+        CTX.font = "14px monospace";
+        CTX.textBaseline = "top";
+        const lines = [
+          "ENTER play/pause   R new round   SPACE regime map   S similar:" +
+            (SIMILAR ? "on" : "off"),
+          "Q / W steer player (manual mode)   speed=" +
+            PLAYERSPEED.toFixed(2) +
+            "   " +
+            (PLAYERMANUAL ? "MANUAL" : "AUTO") +
+            (RUNNING ? "   [running]" : "   [paused]"),
+        ];
+        lines.forEach((t, i) => CTX.fillText(t, 12, 12 + i * 18));
+        if (GAMEOVER) {
+          CTX.fillStyle =
+            RESULT === "PLAYER WINS" ? "rgba(0,140,0,0.95)" : "rgba(180,0,0,0.95)";
+          CTX.font = "bold 28px monospace";
+          CTX.fillText(RESULT + " — press R", 12, 60);
+        }
+        CTX.restore();
+      }
+
       window.addEventListener("keypress", (e) => {
         if (e.key === "Enter") {
-          requestAnimationFrame(loop);
+          if (GAMEOVER) {
+            newRound();
+          }
+          RUNNING = !RUNNING;
+          lastStepTime = performance.now();
+        } else if (e.key === "r" || e.key === "R") {
+          newRound();
         } else if (e.key === " ") {
           HELP = !HELP;
+          document.getElementById("legend").style.display = HELP
+            ? "block"
+            : "none";
         } else if (e.key === "s") {
           SIMILAR = !SIMILAR;
         } else if (e.key === "q") {
@@ -717,8 +863,27 @@
         } else if (e.key === "w") {
           PLAYERMANUAL = true;
           PLAYERANGLE -= DALPHA;
+        } else if (e.key === "+" || e.key === "=") {
+          setSpeed(STEPS_PER_SECOND + 2);
+        } else if (e.key === "-" || e.key === "_") {
+          setSpeed(STEPS_PER_SECOND - 2);
         }
       });
+
+      // Single source of truth for sim speed: keep the variable, the slider,
+      // and the readout in sync no matter which control changed it.
+      const speedSlider = document.getElementById("speed");
+      const speedVal = document.getElementById("speedval");
+      function setSpeed(v) {
+        STEPS_PER_SECOND = Math.max(1, Math.min(60, Math.round(v)));
+        speedSlider.value = STEPS_PER_SECOND;
+        speedVal.textContent = STEPS_PER_SECOND;
+      }
+      speedSlider.addEventListener("input", () => setSpeed(+speedSlider.value));
+      // Keep focus on the page (not the slider) so Q/W/Enter keep working
+      // right after dragging.
+      speedSlider.addEventListener("change", () => speedSlider.blur());
+      setSpeed(STEPS_PER_SECOND);
 
       requestAnimationFrame(loop);
     </script>
