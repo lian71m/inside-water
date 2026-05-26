@@ -2,6 +2,7 @@
 <html>
   <head>
     <style>
+      /* Full-bleed canvas; hide scrollbars so the game fills the window. */
       body {
         margin: 0;
         overflow: hidden;
@@ -11,6 +12,7 @@
         display: block;
       }
 
+      /* "sim speed" control panel, pinned bottom-right, clear of the HUD text. */
       #speedbox {
         position: fixed;
         bottom: 14px;
@@ -29,6 +31,8 @@
         width: 140px;
       }
 
+      /* Regime-map colour legend, bottom-left. Hidden until SPACE turns the
+         regime map on (toggled via JS in the keypress handler). */
       #legend {
         position: fixed;
         bottom: 14px;
@@ -63,12 +67,15 @@
   </head>
 
   <body>
+    <!-- The game renders here. -->
     <canvas id="CANVAS"></canvas>
+    <!-- Playback-speed slider (sim speed, not swimmer speed). -->
     <div id="speedbox">
-      <label for="speed">speed</label>
+      <label for="speed">sim speed</label>
       <input id="speed" type="range" min="1" max="60" step="1" value="8" />
       <span id="speedval">8</span>/s
     </div>
+    <!-- Colour key for the regime map; shown only while the map is on. -->
     <div id="legend">
       <div class="title">Regime map — your prospects from each spot</div>
       <div class="row"><span class="sw" style="background:#0000ff"></span> You win the race outright</div>
@@ -77,15 +84,56 @@
       <div class="row"><span class="sw" style="background:#ffffff"></span> You lose clean — no winning play</div>
     </div>
     <script>
+      /* =====================================================================
+         INSIDE WATER — a water polo positioning game
+         ---------------------------------------------------------------------
+         THE IDEA (water polo "inside water"):
+           Two swimmers race toward a goal. The PLAYER (blue) and the OPPONENT
+           (black) each want to either (a) reach the goal first, or (b) cut the
+           other one off by getting between them and the goal ("getting inside
+           water"). The GOAL is the red marker. These three points always form
+           a triangle; the moment they fall into a straight line, the race is
+           decided and we check who's closer to the goal.
+
+         HOW THE MATH IS ORGANIZED:
+           All the decision math is written for a "slower" and a "faster"
+           swimmer (never "player"/"opponent" directly). slowerFaster() decides
+           which of the two real swimmers is which each step, based on the speed
+           ratio. This keeps the formulas simple — they only ever need the
+           slower swimmer's speed (a value < 1).
+
+         COORDINATE SYSTEM:
+           All positions are in 0..1 "fraction of canvas" units (NOT pixels).
+           x = 0 is left edge, x = 1 is right edge; y = 0 is top, y = 1 bottom.
+           drawSize() converts these fractions to pixels at draw time.
+
+         SPEED — TWO DIFFERENT THINGS WITH SIMILAR NAMES:
+           1) PLAYERSPEED  = how fast the player swims RELATIVE to the opponent
+              (opponent is the baseline of 1). >1 means player is faster.
+              This is the "swimmer ratio" shown in the HUD. Set per round.
+           2) STEPS_PER_SECOND = playback speed: how many simulation steps run
+              per real second. This is the "sim speed" slider. It slows/speeds
+              the whole animation but does NOT change who's faster.
+
+         THE THREE BIG STAGES EACH STEP (see step() near the bottom):
+           1) figure out where everyone should move  -> newposition()/delta()
+           2) advance positions and check for a win  -> step()
+           3) paint everything to the canvas          -> draw()
+         ===================================================================== */
+
+      // ---- Canvas setup -------------------------------------------------
+      // Grab the <canvas> and size it to 90% of the window. CTX is the 2D
+      // drawing context every draw function paints onto.
       const CANVAS = document.getElementById("CANVAS");
       CANVAS.width = window.innerWidth * 0.9;
       CANVAS.height = window.innerHeight * 0.9;
       const CTX = CANVAS.getContext("2d");
       console.log("CANVAS", CANVAS.width, CANVAS.height);
 
-      const MAX = 2 ** 8 - 1;
-      const DT = 0.01;
-      const DALPHA = 0.1;
+      // ---- Constants ----------------------------------------------------
+      const MAX = 2 ** 8 - 1; // 255: max value of a colour channel (0..255)
+      const DT = 0.01; // size of one simulation time-step (how far swimmers move per step)
+      const DALPHA = 0.1; // how much the steering angle changes per Q/W keypress (radians)
       // Anchor positions the SIMILAR (river-frame) transform maps back onto.
       // These are snapshotted from the actual round-start positions in init(),
       // so the opponent really does stay fixed on screen while the player
@@ -96,6 +144,17 @@
       let OPPINITX = 0.5;
       let OPPINITY = 1;
 
+      // ---- Global game state -------------------------------------------
+      // HELP    : is the regime colour-map overlay showing? (SPACE toggles)
+      // SIMILAR : is the river-frame "similar triangle" view on? (S toggles).
+      //           When on, the opponent/goal are pinned in place on screen and
+      //           the player's motion is shown relative to them.
+      // GOALX/Y, OPPX/Y : current positions of goal (red) and opponent (black).
+      // PLAYERMANUAL : if true, the player obeys your Q/W steering instead of
+      //                the auto "optimal" AI.
+      // PLAYERSPEED  : the swimmer-speed ratio (see header). >1 = player faster.
+      // PLAYERX/Y    : current player (blue) position.
+      // PLAYERANGLE  : your steering angle in manual mode (radians).
       let HELP = false;
       let SIMILAR = true;
       let GOALX = GOALINITX;
@@ -119,6 +178,11 @@
         insidewatery: 0,
       };
 
+      // init() — set up a fresh round. Places the goal and opponent on the
+      // fixed river-frame baseline, drops the player at a random side spot,
+      // rolls a random speed ratio, then snapshots these start positions as
+      // the anchors the SIMILAR transform will hold steady. Called once at
+      // load and again from newRound() each time you restart.
       function init() {
         // Goal fixed at top-center, opponent at bottom-center: this is the
         // river-frame baseline the SIMILAR transform keeps stationary.
@@ -140,31 +204,58 @@
       }
       init();
 
-      // function angle(x1, y1, x2, y2) {
-      //   return Math.atan2(y2 - y1, x2 - x1)
-      // } // ?
+      // ====================================================================
+      // GEOMETRY HELPERS
+      // Small reusable vector/geometry functions. Everything below is built
+      // out of these. All inputs are in 0..1 canvas-fraction coordinates.
+      // ====================================================================
+
+      // norm — length of a vector (x, y). Just the Pythagorean theorem.
       function norm(x, y) {
         return Math.sqrt(x ** 2 + y ** 2);
       }
+      // distance — straight-line distance between two points. Used constantly:
+      // by the win checks, the inside-water math, and the movement step sizing.
       function distance(x1, y1, x2, y2) {
         return norm(x2 - x1, y2 - y1);
       }
+      // collinearity — twice the signed area of the triangle (p1, p2, p3).
+      // = 0 exactly when the three points lie on one straight line. The SIGN
+      // tells you which side of the line the third point is on. loop()/step()
+      // watches this value: when its sign flips (or hits 0) the triangle has
+      // collapsed, meaning the race is decided.
       function collinearity(x1, y1, x2, y2, x3, y3) {
         return x1 * (y2 - y3) + x2 * (y3 - y1) + x3 * (y1 - y2);
       }
+      // calcnormedvector — unit (length-1) vector pointing from (x1,y1) to
+      // (x2,y2). Gives a pure direction. Used to build the faster->goal axis
+      // that the inside-water math is measured along.
       function calcnormedvector(x1, y1, x2, y2) {
         const d = distance(x1, y1, x2, y2);
         return [(x2 - x1) / d, (y2 - y1) / d];
       }
+
+      // ---- Decomposing the slower swimmer relative to the faster->goal line
+      // The key trick: take the line from the FASTER swimmer to the GOAL, and
+      // describe the SLOWER swimmer's position in terms of that line:
+      //   p = how far ALONG that line the slower swimmer sits (projection)
+      //   h = how far OFF to the side of that line they sit (perpendicular)
+      // p and h together drive every regime decision below.
+
+      // calcp — the "along the line" component (the projection length).
       function calcp(slowerx, slowery, fasterx, fastery, goalx, goaly) {
         const [ux, uy] = calcnormedvector(fasterx, fastery, goalx, goaly);
         return (slowerx - fasterx) * ux + (slowery - fastery) * uy;
       }
+      // calcnormal — the "off to the side" vector (slower minus its projection
+      // onto the line). Points from the line out to the slower swimmer.
       function calcnormal(slowerx, slowery, fasterx, fastery, goalx, goaly) {
         const p = calcp(slowerx, slowery, fasterx, fastery, goalx, goaly);
         const [ux, uy] = calcnormedvector(fasterx, fastery, goalx, goaly);
         return [slowerx - fasterx - p * ux, slowery - fastery - p * uy];
       }
+      // calch — the length of that sideways vector: the perpendicular distance
+      // h from the slower swimmer to the faster->goal line.
       function calch(slowerx, slowery, fasterx, fastery, goalx, goaly) {
         const [nx, ny] = calcnormal(
           slowerx,
@@ -176,6 +267,16 @@
         );
         return norm(nx, ny);
       }
+      // ====================================================================
+      // REGIME DECISIONS
+      // Given p, h, the speed ratio, and the goal, these answer yes/no
+      // questions about what's possible. targetSlowerFaster() chains them
+      // together to classify the situation into one of 4 "regimes".
+      // ====================================================================
+
+      // slowerwinsdirect — can the slower swimmer just beat the faster one to
+      // the goal in a straight sprint? True if its distance to goal is shorter
+      // than the faster one's distance scaled by the slower one's speed.
       function slowerwinsdirect(
         slowerx,
         slowery,
@@ -187,9 +288,13 @@
       ) {
         const dslower = distance(slowerx, slowery, goalx, goaly);
         const dfaster = distance(fasterx, fastery, goalx, goaly);
-        // console.log("slowerwinsdirect", dslower, dfaster, slowerspeed);
         return dslower < slowerspeed * dfaster;
       }
+      // insidewater — is it geometrically possible for the slower swimmer to
+      // cut the faster one off (reach the faster->goal line ahead of them)?
+      // Compares the sideways distance h against the along-line distance p,
+      // weighted by speed. The sqrt(1 - speed^2) factor comes from the
+      // interception geometry (only valid for speed < 1, i.e. the slower one).
       function insidewater(
         slowerx,
         slowery,
@@ -201,20 +306,17 @@
       ) {
         const h = calch(slowerx, slowery, fasterx, fastery, goalx, goaly);
         const p = calcp(slowerx, slowery, fasterx, fastery, goalx, goaly);
-        // console.log("insidewater", h, p);
         return h * Math.sqrt(1 - slowerspeed ** 2) < slowerspeed * p;
       }
+      // calcs — a helper ratio used to find the exact cutoff point. Turns the
+      // speed into the slope of the interception cone. Used by insidewaterpoint.
       function calcs(slowerspeed) {
         return slowerspeed / Math.sqrt(1 - slowerspeed ** 2);
       }
-      // function insidewater2(slowerx, slowery, fasterx, fastery, goalx, goaly, slowerspeed) {
-      //   let s = r / Math.sqrt(1-r**2)
-      //   let h = calch(slowerx, slowery, fasterx, fastery, goalx, goaly)
-      //   let p = calcp(slowerx, slowery, fasterx, fastery, goalx, goaly)
-      //   let dfaster = distance(fasterx, fastery, goalx, goaly)
-      //   let x = (p + s*h)/dfaster
-      //   return 0 < x && x <= 1
-      // }
+      // guaranteedinsidewater — stronger than insidewater(): is the cutoff not
+      // just possible but UNSTOPPABLE, even if the faster swimmer defends
+      // perfectly? Distinguishes regime 2 (guaranteed) from regime 3
+      // (contested) in targetSlowerFaster.
       function guaranteedinsidewater(
         slowerx,
         slowery,
@@ -227,12 +329,16 @@
         const h = calch(slowerx, slowery, fasterx, fastery, goalx, goaly);
         const p = calcp(slowerx, slowery, fasterx, fastery, goalx, goaly);
         const dfaster = distance(fasterx, fastery, goalx, goaly);
-        // console.log("guaranteedinsidewater", h, p, dfaster);
         return (
           h * Math.sqrt((1 - slowerspeed) / (1 + slowerspeed)) <
           p - (1 - slowerspeed) * dfaster
         );
       }
+      // insidewaterpoint — the actual (x, y) point on the faster->goal line
+      // where the slower swimmer should aim to make the cutoff. Walk p + s*h
+      // along the line from the faster swimmer. This is the slower swimmer's
+      // target whenever a cutoff is on (regimes 2 and 3), and the green dot
+      // drawn on the regime map.
       function insidewaterpoint(
         slowerx,
         slowery,
@@ -246,27 +352,50 @@
         const p = calcp(slowerx, slowery, fasterx, fastery, goalx, goaly);
         const s = calcs(slowerspeed);
         const [ux, uy] = calcnormedvector(fasterx, fastery, goalx, goaly);
-        // console.log("insidewaterpoint", h, p, s, ux, uy);
         return [fasterx + (p + s * h) * ux, fastery + (p + s * h) * uy];
       }
 
+      // ====================================================================
+      // similar — the "river-frame" similarity transform.
+      // Takes a triangle (point1, point2, point3) and the NEW positions that
+      // point1 and point2 should map to (point1', point2'), then returns where
+      // point3 lands under the same rotate+scale+translate that carries
+      // 1->1' and 2->2'. In the game it pins the goal and opponent to their
+      // fixed anchor spots while showing the player's relative motion. Works
+      // by expressing point3 in the (u, perpendicular-u) frame of the original
+      // edge, then rebuilding it in the (v, perpendicular-v) frame of the new
+      // edge. (a, b) are point3's coordinates in that local frame.
+      // ====================================================================
       function similar(x1, y1, x2, y2, x3, y3, x12, y12, x22, y22) {
-        const ux = x2 - x1;
+        const ux = x2 - x1; // original edge 1->2
         const uy = y2 - y1;
-        const vx = x22 - x12;
+        const vx = x22 - x12; // new edge 1'->2'
         const vy = y22 - y12;
-        const wx = x3 - x1;
+        const wx = x3 - x1; // original 1->3
         const wy = y3 - y1;
-        const pUx = -uy;
+        const pUx = -uy; // u rotated 90 deg (perpendicular)
         const pUy = ux;
-        const pVx = -vy;
+        const pVx = -vy; // v rotated 90 deg (perpendicular)
         const pVy = vx;
         const d = ux ** 2 + uy ** 2;
-        const a = (wx * ux + wy * uy) / d;
-        const b = (wx * pUx + wy * pUy) / d;
+        const a = (wx * ux + wy * uy) / d; // point3 along the edge
+        const b = (wx * pUx + wy * pUy) / d; // point3 perpendicular to edge
         return [x12 + a * vx + b * pVx, y12 + a * vy + b * pVy];
       }
 
+      // ====================================================================
+      // targetSlowerFaster — the "brain". Given both swimmers, the goal, and
+      // the slower one's speed, it decides WHERE each swimmer should aim and
+      // classifies the situation into one of 4 regimes:
+      //   regime 1: slower can win the race outright -> both head to goal
+      //   regime 2: slower has a GUARANTEED cutoff   -> slower aims at the
+      //             inside-water point, faster gives up and heads to goal
+      //   regime 3: cutoff is CONTESTED -> slower aims at cutoff, faster
+      //             sidesteps perpendicular to defend
+      //   regime 4: faster wins clean, no cutoff possible -> both to goal
+      // Returns both targets, the inside-water point, and the regime number.
+      // The regime number is what colours the regime map in drawRegimes().
+      // ====================================================================
       function targetSlowerFaster(
         slowerx,
         slowery,
@@ -277,8 +406,10 @@
         slowerspeed,
         dt,
       ) {
+        // Default: both swimmers just head for the goal.
         let [slowertargetx, slowertargety] = [goalx, goaly];
         let [fastertargetx, fastertargety] = [goalx, goaly];
+        // The point the slower swimmer would aim for to make a cutoff.
         const [insidewaterx, insidewatery] = insidewaterpoint(
           slowerx,
           slowery,
@@ -300,8 +431,7 @@
             slowerspeed,
           )
         ) {
-          // slow wins direct, both to goal
-          // console.log("slow wins direct");
+          // Regime 1: slower beats faster to the goal in a straight race.
           regime = 1;
         } else if (
           insidewater(
@@ -314,8 +444,7 @@
             slowerspeed,
           )
         ) {
-          // slow to inside water
-          // console.log("inside water possible");
+          // A cutoff is possible: aim the slower swimmer at the cutoff point.
           [slowertargetx, slowertargety] = [insidewaterx, insidewatery];
           if (
             guaranteedinsidewater(
@@ -328,12 +457,13 @@
               slowerspeed,
             )
           ) {
-            // guaranteed inside water, fast to goal
-            // console.log("guaranteed inside water");
+            // Regime 2: cutoff is guaranteed. Faster swimmer can't stop it,
+            // so it just heads to goal (target stays the default goal).
             regime = 2;
           } else {
-            // contested inside water, fast sidestap
-            // console.log("contested inside water, faster sidestep");
+            // Regime 3: cutoff is contested. Faster swimmer defends by
+            // sidestepping one unit perpendicular to the line (toward the
+            // slower swimmer's side), trying to break up the cutoff.
             const h = calch(slowerx, slowery, fasterx, fastery, goalx, goaly);
             const [nx, ny] = calcnormal(
               slowerx,
@@ -344,7 +474,8 @@
               goaly,
             );
             regime = 3;
-            // console.log("h", h);
+            // Normalize the perpendicular vector (guard against h == 0) and
+            // step the faster swimmer's target one unit against it.
             let [nxh, nyh] = [0, 0];
             if (h != 0) {
               [nxh, nyh] = [nx / h, ny / h];
@@ -352,7 +483,7 @@
             [fastertargetx, fastertargety] = [fasterx - nxh, fastery - nyh];
           }
         } else {
-          // console.log("faster wins direct, no inside water");
+          // Regime 4: faster swimmer wins outright; no cutoff exists.
           regime = 4;
         }
         return [
@@ -365,6 +496,16 @@
           regime,
         ];
       }
+
+      // ====================================================================
+      // MOVEMENT
+      // Turn "where should I aim" (targets) into "how far do I move this step"
+      // (deltas), then assemble the full new positions.
+      // ====================================================================
+
+      // deltaGivenTarget — given a point, a target, a speed and the time-step,
+      // return the (dx, dy) step that moves the point toward the target by the
+      // right distance (speed * dt). If already on the target, don't move.
       function deltaGivenTarget(x, y, targetx, targety, speed, dt) {
         const d = distance(targetx, targety, x, y);
         const factor = d == 0 ? 1 : (dt * speed) / d;
@@ -372,6 +513,9 @@
         const dy = factor * (targety - y);
         return [dx, dy];
       }
+      // turn — manual steering. Instead of aiming at the goal, rotate the
+      // player's "toward goal" direction by playerangle (set by Q/W) and return
+      // a target in that rotated direction. Lets you override the AI and steer.
       function turn(playerx, playery, goalx, goaly, playerangle) {
         const dx = goalx - playerx;
         const dy = goaly - playery;
@@ -381,6 +525,13 @@
           playery - dx * Math.sin(playerangle) + dy * Math.cos(playerangle);
         return [playertargetx, playertargety];
       }
+      // slowerFaster — decide which real swimmer is the "slower" one. The
+      // math everywhere above is written for a slower swimmer with speed < 1.
+      // If the player's ratio is <= 1 the player IS the slower one (speed =
+      // ratio). If it's > 1 the player is faster, so we swap: the opponent
+      // becomes "slower" and the effective speed is the reciprocal (1/ratio),
+      // which is < 1 as the formulas require. The `1 < playerspeed` test here
+      // is the SAME threshold used to flip the regime-map colours.
       function slowerFaster(playerx, playery, oppx, oppy, playerspeed) {
         let [slowerx, slowery, fasterx, fastery, speed] = [
           playerx,
@@ -400,6 +551,16 @@
         }
         return [slowerx, slowery, fasterx, fastery, speed];
       }
+      // delta — compute one step's movement (dx, dy) for the player, the
+      // opponent, and a separate "manual" version of the player. Pipeline:
+      //   1) slowerFaster() labels who's slower/faster
+      //   2) targetSlowerFaster() picks each one's aim point + the regime
+      //   3) deltaGivenTarget() turns each aim into an actual step
+      //   4) turn()+deltaGivenTarget() builds the manual-steer step in parallel
+      //   5) if the player was the faster one, swap the slower/faster deltas
+      //      back so they line up with player/opponent again.
+      // Returns player delta, opponent delta, manual-player delta, and the
+      // inside-water point (for drawing).
       function delta(
         playerx,
         playery,
@@ -411,7 +572,7 @@
         playerspeed,
         dt,
       ) {
-        // console.log("delta2", playerx, playery, oppx, oppy, playerangle, playerspeed);
+        // 1) Who is slower / faster this step?
         let [slowerx, slowery, fasterx, fastery, speed] = slowerFaster(
           playerx,
           playery,
@@ -419,7 +580,7 @@
           oppy,
           playerspeed,
         );
-        // console.log("delta25", slowerx, slowery, fasterx, fastery, speed);
+        // 2) Where should each aim, and what's the regime?
         let [
           slowertargetx,
           slowertargety,
@@ -438,7 +599,7 @@
           speed,
           dt,
         );
-        // console.log("delta3", slowertargetx, slowertargety, fastertargetx, fastertargety, regime);
+        // 3) Convert each aim point into an actual movement step.
         let [slowerdx, slowerdy] = deltaGivenTarget(
           slowerx,
           slowery,
@@ -447,7 +608,6 @@
           playerspeed,
           dt,
         );
-        // console.log("delta4", slowerdx, slowerdy);
         let [fasterdx, fasterdy] = deltaGivenTarget(
           fasterx,
           fastery,
@@ -456,7 +616,7 @@
           1 / playerspeed,
           dt,
         );
-        // console.log("delta5", fasterdx, fasterdy);
+        // 4) Independently compute the manual-steer step from your Q/W angle.
         let [playermanualtargetx, playermanualtargety] = turn(
           playerx,
           playery,
@@ -464,7 +624,6 @@
           goaly,
           playerangle,
         );
-        // console.log("delta55", playermanualtargetx, playermanualtargety); // DEBUG
         let [playermanualdx, playermanualdy] = deltaGivenTarget(
           playerx,
           playery,
@@ -473,7 +632,9 @@
           playerspeed,
           dt,
         );
-        // console.log("delta6", playermanualdx, playermanualdy);
+        // 5) If the player was actually the FASTER swimmer, slowerFaster()
+        // swapped roles — so swap the deltas back so the first pair is always
+        // the player's and the second is always the opponent's.
         if (1 < playerspeed) {
           [slowerdx, slowerdy, fasterdx, fasterdy] = [
             fasterdx,
@@ -482,7 +643,6 @@
             slowerdy,
           ];
         }
-        // console.log("delta7", slowerdx, slowerdy, fasterdx, fasterdy, playermanualdx, playermanualdy);
         return [
           slowerdx,
           slowerdy,
@@ -494,6 +654,16 @@
           insidewatery,
         ];
       }
+      // newposition — take current positions and return the NEW positions
+      // after one step. Calls delta() for the movement, then:
+      //   - if playermanual is on, replaces the player's AI step with the
+      //     manual-steer step.
+      //   - if SIMILAR (river-frame) is on, instead of just adding the deltas,
+      //     it runs the similarity transform so the opponent and goal snap
+      //     back to their fixed anchors and the player is shown relative to
+      //     them. Otherwise it just adds the deltas to the real positions.
+      // Returns: new player x/y, new opp x/y, the raw deltas (for drawing
+      // direction arrows), and the inside-water point.
       function newposition(
         playerx,
         playery,
@@ -506,7 +676,6 @@
         playermanual,
         dt,
       ) {
-        // console.log("newposition", dt, playerx, playery, oppx, oppy); // DEBUG
         let [
           playerdx,
           playerdy,
@@ -527,19 +696,16 @@
           playerspeed,
           dt,
         );
+        // Manual mode: your Q/W steering overrides the AI's player step.
         if (playermanual) {
           [playerdx, playerdy] = [playermanualdx, playermanualdy];
         }
-        // console.log(
-        //   "newposition delta",
-        //   playerdx,
-        //   playerdy,
-        //   oppdx,
-        //   oppdy,
-        //   playermanualdx,
-        //   playermanualdy,
-        // ); // DEBUG
         if (SIMILAR) {
+          // River-frame view: map the moved triangle (goal, moved-opp,
+          // moved-player) back so goal and opp land on their fixed anchors,
+          // and the player is carried along by the same transform. We then
+          // report the opp as sitting exactly on its anchor (it "doesn't
+          // move" on screen) while the player shows the relative motion.
           const [playersimilarx, playersimilary] = similar(
             goalx,
             goaly,
@@ -566,6 +732,7 @@
           ];
         }
 
+        // Normal view: just advance everyone by their deltas.
         return [
           playerx + playerdx,
           playery + playerdy,
@@ -580,14 +747,29 @@
         ];
       }
 
-      // Controls how fast the sim advances, in steps per second.
-      // Lower = slower, more watchable game. Press +/- to change live.
+      // ====================================================================
+      // SIMULATION LOOP
+      // step() advances the world by one tick and checks for a winner.
+      // loop() runs forever via requestAnimationFrame, calling step() at the
+      // chosen playback rate and redrawing every frame.
+      // ====================================================================
+
+      // Controls how fast the sim advances, in steps per second (PLAYBACK
+      // speed — NOT the swimmer speed ratio). Lower = slower, more watchable.
+      // The "sim speed" slider and the +/- keys both change this via setSpeed.
       let STEPS_PER_SECOND = 8;
-      let RUNNING = false;       // is the sim currently advancing?
+      let RUNNING = false;       // is the sim currently advancing? (ENTER toggles)
       let GAMEOVER = false;      // has someone won the current round?
-      let RESULT = "";           // last round result text
+      let RESULT = "";           // last round result text ("PLAYER WINS"/"...LOSES")
       let lastStepTime = 0;      // timestamp of the previous physics step
 
+      // step — advance the world one tick:
+      //   1) record the triangle's orientation (collinearity sign) BEFORE
+      //   2) compute & apply new positions via newposition()
+      //   3) stash the deltas in LAST so draw() can show arrows while paused
+      //   4) recompute collinearity AFTER; if its sign flipped or hit 0 the
+      //      triangle collapsed (the swimmers crossed the decisive line), so
+      //      the race is over — whoever is closer to the goal wins.
       function step() {
         const oldcollinearity = collinearity(
           PLAYERX,
@@ -622,6 +804,7 @@
         );
         [PLAYERX, PLAYERY, OPPX, OPPY] = [playerx, playery, oppx, oppy];
 
+        // Remember this step's deltas / cutoff point for drawing.
         LAST.playerdx = playerdx;
         LAST.playerdy = playerdy;
         LAST.oppdx = oppdx;
@@ -637,6 +820,7 @@
           GOALX,
           GOALY,
         );
+        // Triangle collapsed -> race decided.
         if (
           newcollinearity == 0 ||
           Math.sign(newcollinearity) != Math.sign(oldcollinearity)
@@ -654,8 +838,11 @@
         }
       }
 
-      // Single animation loop. Started exactly once at the bottom of the
-      // script and never anywhere else, so there is only ever ONE loop alive.
+      // loop — the single animation loop, started once at the very bottom and
+      // never anywhere else (so there's only ever ONE loop alive — a previous
+      // bug spawned several). It only calls step() when enough real time has
+      // passed for the current playback rate, but it redraws every frame so
+      // the canvas stays responsive even while paused.
       function loop(now) {
         if (RUNNING && now - lastStepTime >= 1000 / STEPS_PER_SECOND) {
           lastStepTime = now;
@@ -680,6 +867,15 @@
         requestAnimationFrame(loop);
       }
 
+      // ====================================================================
+      // DRAWING
+      // All rendering. Positions come in as 0..1 fractions; drawSize converts
+      // to pixels. draw() paints one full frame.
+      // ====================================================================
+
+      // draw — paint one frame: clear the canvas, optionally overlay the
+      // regime map + cutoff point (when HELP is on), then the three markers
+      // (red goal, blue player, black opponent) and their direction arrows.
       function draw(
         playerx,
         playery,
@@ -695,22 +891,22 @@
         insidewaterx,
         insidewatery,
       ) {
-        const size = 10;
+        const size = 10; // marker size in pixels
         CTX.clearRect(0, 0, CANVAS.width, CANVAS.height);
         if (HELP) {
+          // Regime colour-map background + the green inside-water target dot.
           drawRegimes(oppx, oppy, goalx, goaly, playerspeed);
           drawInside(insidewaterx, insidewatery, size, "green");
         }
-        drawInside(goalx, goaly, size, "red");
-        drawInside(playerx, playery, size, "blue");
-        drawInside(oppx, oppy, size, "black");
+        drawInside(goalx, goaly, size, "red"); // goal
+        drawInside(playerx, playery, size, "blue"); // player
+        drawInside(oppx, oppy, size, "black"); // opponent
         drawDirection(playerx, playery, playerdx, playerdy);
         drawDirection(oppx, oppy, oppdx, oppdy);
-        // drawInside(0, 0, size, "green");
-        // drawInside(1, 0, size, "green");
-        // drawInside(1, 1, size, "green");
-        // drawInside(0, 1, size, "green");
       }
+      // drawSize — convert a 0..1 position into pixel coordinates, clamped so
+      // a marker never spills off the canvas edge. Returns [px, py, psize];
+      // psize is halved when clamped so an edge marker looks visibly pinned.
       function drawSize(x, y, size) {
         let px = x * CANVAS.width;
         let py = y * CANVAS.height;
@@ -732,12 +928,20 @@
         const psize = changed ? size / 2 : size;
         return [px, py, psize];
       }
+      // drawRegimes — paint the regime "heat map". For every pixel it asks:
+      // "if the PLAYER were standing here (opponent and goal where they
+      // actually are), what regime would apply?" and colours the pixel by the
+      // answer. So the whole map shows your prospects from every spot on the
+      // pool. GRANULARITY=1 means evaluate every pixel (slow but exact). Colours
+      // are flipped to the player's perspective when the player is faster (see
+      // the inline note) so a colour always means the same thing for you.
       function drawRegimes(oppx, oppy, goalx, goaly, playerspeed) {
         const image = CTX.createImageData(CANVAS.width, CANVAS.height).data;
         const GRANULARITY = 1;
         for (let y = 0; y < CANVAS.height; y++) {
           for (let x = 0; x < CANVAS.width; x++) {
-            const p = (y * CANVAS.width + x) * 4;
+            const p = (y * CANVAS.width + x) * 4; // index into RGBA pixel array
+            // Skip pixels we're not sampling (only matters if GRANULARITY > 1).
             if (!(y % GRANULARITY == 0 && x % GRANULARITY == 0)) {
               image[p] = 0;
               image[p + 1] = 0;
@@ -745,6 +949,7 @@
               image[p + 3] = 0;
               continue;
             }
+            // Pretend the player is at this pixel; classify the situation.
             const [slowerx, slowery, fasterx, fastery, speed] = slowerFaster(
               x / CANVAS.width,
               y / CANVAS.height,
@@ -780,6 +985,8 @@
             } else if (displayRegime == 3) {
               [r, g, b] = [MAX, MAX, 0];
             }
+            // Write the RGBA for this pixel (alpha MAX/2 = semi-transparent
+            // so the markers on top stay visible).
             image[p] = r;
             image[p + 1] = g;
             image[p + 2] = b;
@@ -787,17 +994,21 @@
           }
         }
         console.log("Regime:", oppx, oppy, goalx, goaly, playerspeed);
+        // Blit the whole computed image to the canvas in one go.
         CTX.putImageData(
           new ImageData(image, CANVAS.width, CANVAS.height),
           0,
           0,
         );
       }
+      // drawInside — draw a single coloured square marker at a 0..1 position.
       function drawInside(x, y, size, c) {
         const [px, py, psize] = drawSize(x, y, size);
         CTX.fillStyle = c;
         CTX.fillRect(px, py, psize, psize);
       }
+      // drawDirection — draw a short line from a swimmer in its movement
+      // direction (the delta), i.e. a little "where I'm heading" arrow.
       function drawDirection(x, y, dx, dy) {
         CTX.fillStyle = "black";
         CTX.beginPath();
@@ -808,6 +1019,13 @@
         CTX.stroke();
       }
 
+      // ====================================================================
+      // UI: round reset, on-screen HUD, and keyboard / slider controls.
+      // ====================================================================
+
+      // newRound — reset everything for a fresh round: re-randomize via init(),
+      // clear the steering angle, drop back to AUTO, clear the game-over state,
+      // and leave the sim paused so the player presses ENTER to begin.
       function newRound() {
         init();
         PLAYERANGLE = 0;
@@ -817,6 +1035,9 @@
         RUNNING = false;
       }
 
+      // drawHUD — the text overlay at the top-left: control hints on line 1,
+      // live state (swimmer ratio, manual/auto, running/paused) on line 2, plus
+      // a big win/lose banner when the round is over.
       function drawHUD() {
         CTX.save();
         CTX.fillStyle = "rgba(0,0,0,0.85)";
@@ -825,8 +1046,9 @@
         const lines = [
           "ENTER play/pause   R new round   SPACE regime map   S similar:" +
             (SIMILAR ? "on" : "off"),
-          "Q / W steer player (manual mode)   speed=" +
+          "Q / W steer player (manual mode)   swimmer ratio=" +
             PLAYERSPEED.toFixed(2) +
+            (PLAYERSPEED > 1 ? " (you faster)" : " (you slower)") +
             "   " +
             (PLAYERMANUAL ? "MANUAL" : "AUTO") +
             (RUNNING ? "   [running]" : "   [paused]"),
@@ -841,6 +1063,11 @@
         CTX.restore();
       }
 
+      // Keyboard controls. ENTER: play/pause (and start a new round if the
+      // last one ended). R: new round. SPACE: toggle the regime map + legend.
+      // S: toggle river-frame view. Q/W: enter manual mode and steer.
+      // +/= and -/_: nudge the playback speed (both shifted and unshifted keys
+      // map to the same action, so you don't need to hold Shift).
       window.addEventListener("keypress", (e) => {
         if (e.key === "Enter") {
           if (GAMEOVER) {
@@ -885,6 +1112,8 @@
       speedSlider.addEventListener("change", () => speedSlider.blur());
       setSpeed(STEPS_PER_SECOND);
 
+      // Start the one and only animation loop. Everything is now defined, so
+      // from here on loop() runs every frame for the life of the page.
       requestAnimationFrame(loop);
     </script>
   </body>
